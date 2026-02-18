@@ -1,0 +1,1543 @@
+/* ============================================================
+   SorSU TikTalk — app.js
+   ============================================================ */
+'use strict';
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const EMOJIS = [
+    '👍', '❤️', '😂', '😮', '😢', '🔥',
+    '👏', '🎉', '😡', '🤔', '💯', '✨',
+    '😎', '🙏', '💀'
+];
+
+const BAN_DURATIONS = {
+    'temp-1h': 3_600_000,
+    'temp-6h': 21_600_000,
+    'temp-24h': 86_400_000,
+    'temp-7d': 604_800_000,
+};
+
+const HEART_THRESHOLD_MS = 5 * 60 * 1000;  // 5 minutes
+const HEART_COUNTDOWN_SEC = 30;
+
+// ============================================================
+// STATE
+// ============================================================
+let ws = null;
+let myNick = '';
+let myCampus = '';
+let myId = '';
+let currentPanel = 'global';
+let replyTo = null;
+let replyPreview = '';
+let pendingReport = null;
+let pendingEmojiId = null;
+let dmTarget = null;
+let isAdmin = false;
+
+/** @type {Object.<string, Array>} */
+const dmHistory = {};
+
+// DM-specific state
+let dmReplyTo = null;
+let dmEditingId = null;
+let pendingDMReport = null;
+let pendingDMEmoji = null;
+
+// Stranger-specific state
+let strangerSessionId = null;
+let strangerStartTime = null;
+let strangerDurationTimer = null;
+let strangerHeartTimer = null;
+let strangerHeartCountdown = null;
+let strangerMyHeartClicked = false;
+let strangerReplyTo = null;
+let strangerEditingId = null;
+let pendingStrangerEmoji = null;
+let pendingStrangerReport = null;
+
+/** @type {Array} stranger message history for this session */
+const strangerMsgs = [];
+
+let dmMsgCounter = 0;
+let smsgCounter = 0;
+function newDMId() { return `dm_${Date.now()}_${++dmMsgCounter}`; }
+function newSmsgId() { return `sm_${Date.now()}_${++smsgCounter}`; }
+
+// ============================================================
+// UTILITY HELPERS
+// ============================================================
+function escapeHTML(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function nickColor(nick) {
+    let h = 0;
+    for (let i = 0; i < nick.length; i++) h = nick.charCodeAt(i) + ((h << 5) - h);
+    const palettes = [
+        'linear-gradient(135deg,#4f8ef7,#a78bfa)',
+        'linear-gradient(135deg,#34d399,#4f8ef7)',
+        'linear-gradient(135deg,#f59e0b,#ef4444)',
+        'linear-gradient(135deg,#ec4899,#8b5cf6)',
+        'linear-gradient(135deg,#06b6d4,#3b82f6)',
+        'linear-gradient(135deg,#f97316,#eab308)',
+    ];
+    return palettes[Math.abs(h) % palettes.length];
+}
+
+function formatTime(ts) {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatDateTime(ts) {
+    return new Date(ts).toLocaleString();
+}
+
+function formatDuration(ms) {
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return [h, m, sec].map(v => String(v).padStart(2, '0')).join(':');
+}
+
+// ============================================================
+// TOAST
+// ============================================================
+function toast(msg, type = 'info') {
+    const container = document.getElementById('toast-container');
+    const el = document.createElement('div');
+    el.className = `toast ${type}`;
+    el.textContent = msg;
+    container.appendChild(el);
+    setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transition = 'opacity 0.4s';
+        setTimeout(() => el.remove(), 400);
+    }, 3500);
+}
+
+// ============================================================
+// MODAL
+// ============================================================
+function openModal(id) { document.getElementById(id).classList.add('show'); }
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+
+// ============================================================
+// THEME
+// ============================================================
+function toggleTheme() {
+    const html = document.documentElement;
+    const isDark = html.getAttribute('data-theme') === 'dark';
+    html.setAttribute('data-theme', isDark ? 'light' : 'dark');
+    document.querySelectorAll('.toggle').forEach(t => t.classList.toggle('on', !isDark));
+}
+
+// ============================================================
+// PAGE NAVIGATION
+// ============================================================
+function showPage(page) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById(page + '-page').classList.add('active');
+}
+
+// ============================================================
+// CHAT PANEL SWITCHING
+// ============================================================
+function showPanel(name) {
+    document.querySelectorAll('.chat-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    currentPanel = name;
+
+    const panelId = {
+        global: 'panel-global', ann: 'panel-ann', dm: 'panel-dm', stranger: 'panel-stranger'
+    }[name];
+    if (panelId) document.getElementById(panelId).classList.add('active');
+
+    const navId = { global: 'nav-global', ann: 'nav-ann', stranger: 'nav-stranger' }[name];
+    if (navId) { const el = document.getElementById(navId); if (el) el.classList.add('active'); }
+}
+
+// ============================================================
+// ENTER / LEAVE CHAT
+// ============================================================
+function enterChat() {
+    const nick = document.getElementById('nick-input').value.trim();
+    const campus = document.getElementById('campus-select').value;
+    if (!nick) return toast('Please enter a nickname.', 'error');
+    if (!campus) return toast('Please select your campus.', 'error');
+
+    myNick = nick;
+    myCampus = campus;
+    document.getElementById('me-name').textContent = nick;
+    document.getElementById('me-campus').textContent = campus.split(' - ')[0];
+    document.getElementById('me-avatar').textContent = nick[0].toUpperCase();
+
+    showPage('chat');
+    connectWS();
+}
+
+function leaveChat() {
+    if (ws) ws.close();
+    strangerCleanupUI();
+    showPage('front');
+}
+
+// ============================================================
+// WEBSOCKET
+// ============================================================
+function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}`);
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'join', nickname: myNick, campus: myCampus }));
+        toast('Connected to SorSU TikTalk!', 'success');
+    };
+
+    ws.onmessage = (e) => {
+        try { handleServerMessage(JSON.parse(e.data)); }
+        catch (err) { console.error('Parse error:', err); }
+    };
+
+    ws.onclose = () => {
+        toast('Disconnected. Reconnecting in 3s…', 'error');
+        setTimeout(connectWS, 3000);
+    };
+
+    ws.onerror = () => ws.close();
+}
+
+function wsSend(payload) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+}
+
+// ============================================================
+// SERVER MESSAGE ROUTER
+// ============================================================
+function handleServerMessage(data) {
+    switch (data.type) {
+        case 'chat': renderChatMsg(data); break;
+        case 'system': renderSystemMsg(data.message); break;
+        case 'user_list': renderUserList(data.users); break;
+        case 'react': applyReaction(data); break;
+        case 'announcement': renderAnnouncement(data.announcement); break;
+        case 'report_ack': toast('Report submitted to admin.', 'success'); break;
+        case 'error': toast(data.message, 'error'); break;
+        case 'banned': handleBanned(data.message); break;
+
+        // DM events
+        case 'dm': receiveDM(data); break;
+        case 'dm_sent':      /* optimistic render */ break;
+        case 'dm_edit': receiveDMEdit(data); break;
+        case 'dm_delete': receiveDMDelete(data); break;
+        case 'dm_react': receiveDMReact(data); break;
+
+        // Stranger events
+        case 'stranger_waiting': strangerOnWaiting(); break;
+        case 'stranger_cancelled': strangerOnCancelled(); break;
+        case 'stranger_matched': strangerOnMatched(data); break;
+        case 'stranger_msg': strangerReceiveMsg(data); break;
+        case 'stranger_msg_sent': strangerOnMsgSent(data); break;
+        case 'stranger_edit': strangerReceiveEdit(data); break;
+        case 'stranger_delete': strangerReceiveDelete(data); break;
+        case 'stranger_react': strangerReceiveReact(data); break;
+        case 'stranger_ended': strangerOnEnded(data); break;
+        case 'stranger_heart_received': strangerOnHeartReceived(); break;
+        case 'stranger_move_to_dm': strangerMoveToDM(data); break;
+
+        case 'joined':
+            myId = data.id;
+            if (Array.isArray(data.announcements)) {
+                data.announcements.forEach(a => renderAnnouncement(a, false));
+            }
+            break;
+
+        // Admin
+        case 'admin_ok':
+            isAdmin = true;
+            document.getElementById('admin-login').style.display = 'none';
+            document.getElementById('admin-dashboard').style.display = '';
+            renderAdminData(data.reports, data.bannedIPs);
+            break;
+        case 'admin_fail': toast('Invalid admin secret.', 'error'); break;
+        case 'new_report': appendReport(data.report); break;
+        case 'admin_data': renderAdminData(data.reports, data.bannedIPs); break;
+        case 'ban_ok': toast('User banned.', 'success'); wsSend({ type: 'admin_get_data' }); break;
+        case 'unban_ok': toast('User unbanned.', 'success'); renderAdminData(null, data.bannedIPs); break;
+    }
+}
+
+function handleBanned(message) {
+    alert('⛔ ' + message);
+    if (ws) ws.close();
+    showPage('front');
+}
+
+// ============================================================
+// GLOBAL CHAT RENDERING
+// ============================================================
+function renderChatMsg(data) {
+    const wrap = document.getElementById('messages-wrap');
+    const div = document.createElement('div');
+    div.className = 'msg';
+    div.id = data.id;
+    div.dataset.nick = data.nickname;
+    div.dataset.campus = data.campus;
+    div.dataset.message = data.message;
+
+    const time = formatTime(data.timestamp);
+    const initial = data.nickname[0].toUpperCase();
+    const campus = escapeHTML((data.campus || '').split(' - ')[0] || data.campus);
+    const replyHTML = data.replyTo
+        ? `<div class="msg-reply-preview">↩ ${escapeHTML(data.replyPreview || '…')}</div>` : '';
+
+    div.innerHTML = `
+    <div class="msg-avatar"><div class="avatar sm" style="background:${nickColor(data.nickname)}">${initial}</div></div>
+    <div class="msg-body">
+      <div class="msg-header">
+        <span class="msg-nick" data-dm-nick="${escapeHTML(data.nickname)}">${escapeHTML(data.nickname)}</span>
+        <span class="msg-campus">${campus}</span>
+        <span class="msg-time">${time}</span>
+      </div>
+      ${replyHTML}
+      <div class="msg-text">${escapeHTML(data.message)}</div>
+      <div class="msg-reactions" id="react-${data.id}"></div>
+    </div>
+    <div class="msg-actions">
+      <button class="msg-action-btn" data-reply-id="${data.id}" data-reply-nick="${escapeHTML(data.nickname)}" data-reply-msg="${escapeHTML(data.message)}">↩ Reply</button>
+      <button class="msg-action-btn" data-emoji-id="${data.id}">😊 React</button>
+      <button class="msg-action-btn report" data-report-id="${data.id}" data-report-nick="${escapeHTML(data.nickname)}" data-report-campus="${escapeHTML(data.campus)}" data-report-msg="${escapeHTML(data.message)}">🚨 Report</button>
+    </div>`;
+
+    wrap.appendChild(div);
+    scrollToBottom();
+}
+
+function renderSystemMsg(text) {
+    const wrap = document.getElementById('messages-wrap');
+    const div = document.createElement('div');
+    div.className = 'system-msg';
+    div.textContent = text;
+    wrap.appendChild(div);
+    scrollToBottom();
+}
+
+function scrollToBottom() {
+    const w = document.getElementById('messages-wrap');
+    w.scrollTop = w.scrollHeight;
+}
+
+// ============================================================
+// SEND GLOBAL CHAT
+// ============================================================
+function sendChat() {
+    const input = document.getElementById('chat-input');
+    const msg = input.value.trim();
+    if (!msg) return;
+    wsSend({ type: 'chat', message: msg, replyTo, replyPreview });
+    input.value = '';
+    input.style.height = '';
+    clearReply();
+}
+
+function handleChatKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+}
+
+function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+}
+
+// ============================================================
+// GLOBAL REPLY
+// ============================================================
+function startReply(msgId, nick, text) {
+    replyTo = msgId;
+    replyPreview = `${nick}: ${text.slice(0, 60)}`;
+    document.getElementById('reply-preview-text').textContent =
+        `↩ Replying to ${nick}: "${text.slice(0, 50)}${text.length > 50 ? '…' : ''}"`;
+    document.getElementById('reply-banner').classList.add('show');
+    document.getElementById('chat-input').focus();
+}
+
+function clearReply() {
+    replyTo = null; replyPreview = '';
+    document.getElementById('reply-banner').classList.remove('show');
+}
+
+// ============================================================
+// GLOBAL EMOJI REACTIONS
+// ============================================================
+function openEmojiModal(msgId) {
+    pendingEmojiId = msgId;
+    const grid = document.getElementById('emoji-grid');
+    grid.innerHTML = '';
+    EMOJIS.forEach(em => {
+        const btn = document.createElement('button');
+        btn.className = 'emoji-btn global-emoji-btn';
+        btn.textContent = em;
+        btn.dataset.globalEmoji = em;
+        grid.appendChild(btn);
+    });
+    openModal('emoji-modal');
+}
+
+function sendEmoji(emoji, msgId) {
+    const targetId = msgId || pendingEmojiId;
+    if (!targetId) return;
+    wsSend({ type: 'react', msgId: targetId, emoji });
+    pendingEmojiId = null;
+}
+
+function applyReaction(data) {
+    const container = document.getElementById('react-' + data.msgId);
+    if (!container) return;
+    if (!container._counts) container._counts = {};
+    container._counts[data.emoji] = (container._counts[data.emoji] || 0) + 1;
+    container.innerHTML = '';
+    Object.entries(container._counts).forEach(([emoji, count]) => {
+        const pill = document.createElement('div');
+        pill.className = 'reaction-pill';
+        pill.dataset.emoji = emoji;
+        pill.textContent = `${emoji} ${count}`;
+        pill.title = 'React';
+        container.appendChild(pill);
+    });
+}
+
+// ============================================================
+// GLOBAL REPORT
+// ============================================================
+function openReportModal(msgId, nick, campus, message) {
+    pendingReport = { msgId, nick, campus, message, source: 'Global Chat' };
+    // Show the reported message as a preview
+    const box = document.getElementById('report-preview-box');
+    box.textContent = `${nick}: "${message.slice(0, 120)}${message.length > 120 ? '…' : ''}"`;
+    // Clear previous reason
+    document.getElementById('report-reason').value = '';
+    openModal('report-modal');
+}
+
+function submitReport() {
+    if (!pendingReport) return;
+    const reason = document.getElementById('report-reason').value.trim();
+    wsSend({
+        type: 'report',
+        msgId: pendingReport.msgId,
+        targetNick: pendingReport.nick,
+        targetCampus: pendingReport.campus,
+        message: pendingReport.message,
+        reason: reason || '(no reason provided)',
+        source: pendingReport.source || 'Global Chat',
+    });
+    closeModal('report-modal');
+    document.getElementById('report-reason').value = '';
+    pendingReport = null;
+    toast('Report submitted to admin.', 'success');
+}
+
+// ============================================================
+// ONLINE USER LIST
+// ============================================================
+function renderUserList(users) {
+    const list = document.getElementById('online-list');
+    const count = document.getElementById('online-count');
+    count.textContent = users.length;
+    list.innerHTML = '';
+    users.forEach(u => {
+        if (u.nickname === myNick) return;
+        const div = document.createElement('div');
+        div.className = 'online-user';
+        div.dataset.dmNick = u.nickname;
+        const campus = escapeHTML((u.campus || '').split(' - ')[0]);
+        div.innerHTML = `
+      <div class="avatar sm" style="background:${nickColor(u.nickname)}">${u.nickname[0].toUpperCase()}</div>
+      <div class="online-info">
+        <div class="online-name">${escapeHTML(u.nickname)}</div>
+        <div class="online-campus">${campus}</div>
+      </div>
+      <div class="online-dot"></div>`;
+        list.appendChild(div);
+    });
+}
+
+// ============================================================
+// ANNOUNCEMENTS
+// ============================================================
+function renderAnnouncement(ann, animate = true) {
+    const list = document.getElementById('ann-list');
+    const empty = list.querySelector('.ann-empty');
+    if (empty) empty.remove();
+    const card = document.createElement('div');
+    card.className = 'ann-card';
+    if (!animate) card.style.animation = 'none';
+    card.innerHTML = `
+    <div class="ann-card-time">📅 ${formatDateTime(ann.timestamp)}</div>
+    <div class="ann-card-text">${escapeHTML(ann.text)}</div>
+    <div style="margin-top:10px;display:flex;justify-content:flex-end">
+      <button class="ann-report-btn"
+        data-ann-report-id="${escapeHTML(ann.id)}"
+        data-ann-report-text="${escapeHTML(ann.text)}">🚨 Report</button>
+    </div>`;
+    list.prepend(card);
+    if (animate) toast('📣 New announcement!', 'info');
+}
+
+// ============================================================
+// DIRECT MESSAGING
+// ============================================================
+
+function openDM(nick) {
+    if (!nick || nick === myNick) return;
+    dmTarget = nick;
+    document.getElementById('dm-with-name').textContent = nick;
+    document.getElementById('dm-avatar').textContent = nick[0].toUpperCase();
+    const msgs = document.getElementById('dm-messages');
+    msgs.innerHTML = '';
+    clearDMReply();
+    clearDMEdit();
+    (dmHistory[nick] || []).forEach(m => msgs.appendChild(buildDMBubble(m)));
+    msgs.scrollTop = msgs.scrollHeight;
+    showPanel('dm');
+    updateDMNav(nick);
+    document.getElementById('dm-input').focus();
+}
+
+function updateDMNav(nick) {
+    const section = document.getElementById('dm-nav-section');
+    section.style.display = '';
+    const list = document.getElementById('dm-nav-list');
+    const exists = [...list.querySelectorAll('[data-dm-nav]')].some(el => el.dataset.dmNav === nick);
+    if (!exists) {
+        const div = document.createElement('div');
+        div.className = 'nav-item';
+        div.dataset.dmNav = nick;
+        div.innerHTML = `<span class="icon">💬</span> ${escapeHTML(nick)}`;
+        div.addEventListener('click', () => openDM(nick));
+        list.appendChild(div);
+    }
+}
+
+function closeDM() {
+    dmTarget = null;
+    clearDMReply();
+    clearDMEdit();
+    showPanel('global');
+}
+
+/**
+ * Build a DM bubble.
+ * KEY FIX: Action buttons are rendered INLINE in document flow,
+ * never absolutely-positioned. This prevents overflow-clipping
+ * and the hover-leaves-target issue.
+ */
+function buildDMBubble(m) {
+    const wrap = document.createElement('div');
+    wrap.className = `dm-msg ${m.sent ? 'sent' : 'recv'}${m.deleted ? ' deleted' : ''}`;
+    wrap.id = 'dm-bubble-' + m.id;
+    wrap.dataset.dmId = m.id;
+
+    const speakerNick = m.sent ? myNick : (dmTarget || '');
+    const time = formatTime(m.time);
+    const bubbleText = m.deleted ? '🗑 This message was deleted.' : escapeHTML(m.text);
+    const editedBadge = m.edited && !m.deleted ? `<span class="dm-edited-badge">edited</span>` : '';
+    const replyHTML = m.replyTo
+        ? `<div class="dm-reply-preview">↩ ${escapeHTML(m.replyTo.nick)}: "${escapeHTML(m.replyTo.text.slice(0, 50))}"</div>` : '';
+    const reactHTML = buildDMReactionHTML(m);
+
+    // Build action buttons as inline DOM elements (not HTML string injection into .innerHTML)
+    // This avoids any possibility of pointer-events CSS fighting with the layout.
+    let actionsEl = null;
+    if (!m.deleted) {
+        actionsEl = document.createElement('div');
+        actionsEl.className = 'dm-actions';
+
+        // React — always shown
+        const reactBtn = document.createElement('button');
+        reactBtn.className = 'dm-action-btn';
+        reactBtn.dataset.dmReact = m.id;
+        reactBtn.textContent = '😊 React';
+        actionsEl.appendChild(reactBtn);
+
+        // Reply — always shown
+        const replyBtn = document.createElement('button');
+        replyBtn.className = 'dm-action-btn';
+        replyBtn.dataset.dmReply = m.id;
+        replyBtn.dataset.dmReplyNick = speakerNick;
+        replyBtn.dataset.dmReplyText = m.text;
+        replyBtn.textContent = '↩ Reply';
+        actionsEl.appendChild(replyBtn);
+
+        // Edit — only on sent
+        if (m.sent) {
+            const editBtn = document.createElement('button');
+            editBtn.className = 'dm-action-btn dm-act-edit';
+            editBtn.dataset.dmEdit = m.id;
+            editBtn.textContent = '✏️ Edit';
+            actionsEl.appendChild(editBtn);
+        }
+
+        // Delete — only on sent
+        if (m.sent) {
+            const delBtn = document.createElement('button');
+            delBtn.className = 'dm-action-btn dm-act-delete';
+            delBtn.dataset.dmDelete = m.id;
+            delBtn.textContent = '🗑 Delete';
+            actionsEl.appendChild(delBtn);
+        }
+
+        // Report — only on received
+        if (!m.sent) {
+            const repBtn = document.createElement('button');
+            repBtn.className = 'dm-action-btn dm-act-report';
+            repBtn.dataset.dmReport = m.id;
+            repBtn.dataset.dmReportNick = speakerNick;
+            repBtn.dataset.dmReportText = m.text;
+            repBtn.textContent = '🚨 Report';
+            actionsEl.appendChild(repBtn);
+        }
+    }
+
+    // Build main bubble HTML
+    wrap.innerHTML = `
+    <div class="dm-bubble">${replyHTML}${bubbleText}</div>
+    <div class="dm-reactions">${reactHTML}</div>
+    <div class="dm-meta"><span>${time}</span>${editedBadge}</div>`;
+
+    // Insert actions AFTER the meta (below the bubble)
+    if (actionsEl) wrap.appendChild(actionsEl);
+
+    return wrap;
+}
+
+function buildDMReactionHTML(m) {
+    if (!m.reactions || !Object.keys(m.reactions).length) return '';
+    return Object.entries(m.reactions).map(([emoji, count]) =>
+        `<span class="dm-reaction-pill" data-dm-pill-id="${m.id}" data-dm-pill-emoji="${emoji}">${emoji} ${count}</span>`
+    ).join('');
+}
+
+function refreshDMBubble(dmMsgId, nick) {
+    const history = dmHistory[nick];
+    if (!history) return;
+    const entry = history.find(m => m.id === dmMsgId);
+    if (!entry) return;
+    const existing = document.getElementById('dm-bubble-' + dmMsgId);
+    if (!existing) return;
+    existing.replaceWith(buildDMBubble(entry));
+}
+
+// ── Send DM ────────────────────────────────────────────────
+function sendDM() {
+    const input = document.getElementById('dm-input');
+    const msg = input.value.trim();
+    if (!msg || !dmTarget) return;
+
+    if (dmEditingId) {
+        const entry = (dmHistory[dmTarget] || []).find(m => m.id === dmEditingId);
+        if (entry) {
+            entry.text = msg;
+            entry.edited = true;
+            refreshDMBubble(dmEditingId, dmTarget);
+            wsSend({ type: 'dm_edit', targetNick: dmTarget, dmMsgId: dmEditingId, newText: msg });
+        }
+        input.value = ''; input.style.height = '';
+        clearDMEdit();
+        return;
+    }
+
+    const dmId = newDMId();
+    const entry = { id: dmId, text: msg, sent: true, time: Date.now(), reactions: {}, deleted: false, edited: false, replyTo: dmReplyTo ? { id: dmReplyTo.dmMsgId, nick: dmReplyTo.nick, text: dmReplyTo.text } : null };
+    if (!dmHistory[dmTarget]) dmHistory[dmTarget] = [];
+    dmHistory[dmTarget].push(entry);
+
+    const msgs = document.getElementById('dm-messages');
+    msgs.appendChild(buildDMBubble(entry));
+    msgs.scrollTop = msgs.scrollHeight;
+
+    wsSend({ type: 'dm', targetNick: dmTarget, message: msg, dmMsgId: dmId, replyTo: entry.replyTo });
+    input.value = ''; input.style.height = '';
+    clearDMReply();
+}
+
+function handleDMKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendDM(); }
+}
+
+// ── DM Reply ───────────────────────────────────────────────
+function startDMReply(dmMsgId, nick, text) {
+    dmReplyTo = { dmMsgId, nick, text };
+    clearDMEdit();
+    document.getElementById('dm-reply-preview-text').textContent =
+        `↩ ${nick}: "${text.slice(0, 50)}${text.length > 50 ? '…' : ''}"`;
+    document.getElementById('dm-reply-banner').classList.add('show');
+    document.getElementById('dm-input').focus();
+}
+
+function clearDMReply() {
+    dmReplyTo = null;
+    const b = document.getElementById('dm-reply-banner');
+    if (b) b.classList.remove('show');
+}
+
+// ── DM Edit ────────────────────────────────────────────────
+function startDMEdit(dmMsgId) {
+    const entry = (dmHistory[dmTarget] || []).find(m => m.id === dmMsgId);
+    if (!entry || !entry.sent) return;
+    clearDMReply();
+    dmEditingId = dmMsgId;
+    const input = document.getElementById('dm-input');
+    input.value = entry.text;
+    autoResize(input);
+    input.focus();
+    document.getElementById('dm-edit-banner').classList.add('show');
+}
+
+function clearDMEdit() {
+    dmEditingId = null;
+    const b = document.getElementById('dm-edit-banner');
+    if (b) b.classList.remove('show');
+    const input = document.getElementById('dm-input');
+    if (input) { input.value = ''; input.style.height = ''; }
+}
+
+function cancelDMEdit() {
+    dmEditingId = null;
+    document.getElementById('dm-edit-banner').classList.remove('show');
+    const input = document.getElementById('dm-input');
+    input.value = ''; input.style.height = '';
+}
+
+// ── DM Delete ──────────────────────────────────────────────
+function deleteDMMsg(dmMsgId) {
+    const entry = (dmHistory[dmTarget] || []).find(m => m.id === dmMsgId);
+    if (!entry || !entry.sent) return;
+    entry.deleted = true; entry.text = '';
+    refreshDMBubble(dmMsgId, dmTarget);
+    wsSend({ type: 'dm_delete', targetNick: dmTarget, dmMsgId });
+}
+
+// ── DM React ───────────────────────────────────────────────
+function openDMEmojiModal(dmMsgId) {
+    pendingDMEmoji = dmMsgId;
+    const grid = document.getElementById('dm-emoji-grid');
+    grid.innerHTML = '';
+    EMOJIS.forEach(em => {
+        const btn = document.createElement('button');
+        btn.className = 'emoji-btn dm-emoji-btn';
+        btn.textContent = em;
+        btn.dataset.dmPickEmoji = em;
+        grid.appendChild(btn);
+    });
+    openModal('dm-emoji-modal');
+}
+
+function sendDMReaction(emoji, dmMsgId) {
+    const id = dmMsgId || pendingDMEmoji;
+    if (!id || !dmTarget) return;
+    applyDMReaction(dmTarget, id, emoji);
+    wsSend({ type: 'dm_react', targetNick: dmTarget, dmMsgId: id, emoji });
+    pendingDMEmoji = null;
+}
+
+function applyDMReaction(nick, dmMsgId, emoji) {
+    const history = dmHistory[nick];
+    if (!history) return;
+    const entry = history.find(m => m.id === dmMsgId);
+    if (!entry) return;
+    if (!entry.reactions) entry.reactions = {};
+    entry.reactions[emoji] = (entry.reactions[emoji] || 0) + 1;
+    if (dmTarget === nick) refreshDMBubble(dmMsgId, nick);
+}
+
+// ── DM Report ──────────────────────────────────────────────
+function openDMReportModal(dmMsgId, nick, text) {
+    pendingDMReport = { dmMsgId, nick, text };
+    const box = document.getElementById('dm-report-preview-box');
+    box.textContent = `${nick}: "${text.slice(0, 120)}${text.length > 120 ? '…' : ''}"`;
+    document.getElementById('dm-report-reason').value = '';
+    openModal('dm-report-modal');
+}
+
+function submitDMReport() {
+    if (!pendingDMReport) return;
+    const reason = document.getElementById('dm-report-reason').value.trim();
+    wsSend({
+        type: 'dm_report',
+        dmMsgId: pendingDMReport.dmMsgId,
+        targetNick: pendingDMReport.nick,
+        message: pendingDMReport.text,
+        reason: reason || '(no reason provided)',
+        source: 'Direct Message',
+    });
+    closeModal('dm-report-modal');
+    document.getElementById('dm-report-reason').value = '';
+    toast('DM reported to admin.', 'success');
+    pendingDMReport = null;
+}
+
+// ── DM Receive events ──────────────────────────────────────
+function receiveDM(data) {
+    toast(`💬 DM from ${data.from}: "${data.message.slice(0, 40)}"`, 'info');
+    if (!dmHistory[data.from]) dmHistory[data.from] = [];
+    const entry = { id: data.dmMsgId || newDMId(), text: data.message, sent: false, time: data.timestamp, reactions: {}, deleted: false, edited: false, replyTo: data.replyTo || null };
+    dmHistory[data.from].push(entry);
+    updateDMNav(data.from);
+    if (dmTarget === data.from) {
+        const msgs = document.getElementById('dm-messages');
+        msgs.appendChild(buildDMBubble(entry));
+        msgs.scrollTop = msgs.scrollHeight;
+    }
+}
+
+function receiveDMEdit(data) {
+    const history = dmHistory[data.from];
+    if (!history) return;
+    const entry = history.find(m => m.id === data.dmMsgId);
+    if (entry) { entry.text = data.newText; entry.edited = true; if (dmTarget === data.from) refreshDMBubble(data.dmMsgId, data.from); }
+}
+
+function receiveDMDelete(data) {
+    const history = dmHistory[data.from];
+    if (!history) return;
+    const entry = history.find(m => m.id === data.dmMsgId);
+    if (entry) { entry.deleted = true; entry.text = ''; if (dmTarget === data.from) refreshDMBubble(data.dmMsgId, data.from); }
+}
+
+function receiveDMReact(data) {
+    applyDMReaction(data.from, data.dmMsgId, data.emoji);
+}
+
+// ============================================================
+// STRANGER MATCHING
+// ============================================================
+
+function strangerFind() {
+    wsSend({ type: 'stranger_find' });
+}
+
+function strangerCancel() {
+    wsSend({ type: 'stranger_cancel_find' });
+}
+
+function strangerEnd() {
+    wsSend({ type: 'stranger_end' });
+    strangerCleanupAll();
+    strangerShowLobby();
+    toast('Stranger chat ended.', 'info');
+}
+
+// ── Stranger lobby / search UI ─────────────────────────────
+function strangerShowLobby() {
+    document.getElementById('stranger-lobby').style.display = '';
+    document.getElementById('stranger-searching').style.display = 'none';
+    document.getElementById('stranger-chat').style.display = 'none';
+}
+
+function strangerShowSearching() {
+    document.getElementById('stranger-lobby').style.display = 'none';
+    document.getElementById('stranger-searching').style.display = '';
+    document.getElementById('stranger-chat').style.display = 'none';
+}
+
+function strangerShowChat() {
+    document.getElementById('stranger-lobby').style.display = 'none';
+    document.getElementById('stranger-searching').style.display = 'none';
+    document.getElementById('stranger-chat').style.display = '';
+}
+
+// ── Server event handlers ──────────────────────────────────
+function strangerOnWaiting() {
+    strangerShowSearching();
+}
+
+function strangerOnCancelled() {
+    strangerShowLobby();
+}
+
+function strangerOnMatched(data) {
+    strangerSessionId = data.sessionId;
+    strangerStartTime = Date.now();
+    strangerMyHeartClicked = false;
+    strangerMsgs.length = 0;
+    strangerReplyTo = null;
+    strangerEditingId = null;
+
+    document.getElementById('stranger-messages').innerHTML = '';
+    document.getElementById('stranger-heart-banner').style.display = 'none';
+    document.getElementById('stranger-reply-banner').classList.remove('show');
+    document.getElementById('stranger-edit-banner').classList.remove('show');
+    document.getElementById('stranger-input').value = '';
+    const heartBtn = document.getElementById('stranger-heart-btn');
+    heartBtn.classList.remove('clicked');
+    heartBtn.disabled = false;
+    heartBtn.textContent = '❤️ Yes, Continue!';
+
+    strangerShowChat();
+    showPanel('stranger');
+    document.getElementById('stranger-messages').innerHTML =
+        `<div class="system-msg">🎲 You've been matched with an anonymous stranger! Say hi!</div>`;
+
+    // Start duration timer
+    if (strangerDurationTimer) clearInterval(strangerDurationTimer);
+    strangerDurationTimer = setInterval(() => {
+        const elapsed = Date.now() - strangerStartTime;
+        document.getElementById('stranger-duration').textContent = formatDuration(elapsed);
+
+        // After 5 minutes, show heart banner
+        if (elapsed >= HEART_THRESHOLD_MS) {
+            const banner = document.getElementById('stranger-heart-banner');
+            if (banner.style.display === 'none') {
+                banner.style.display = 'flex';
+                strangerStartHeartCountdown();
+            }
+        }
+    }, 1000);
+
+    toast('🎲 Matched with a stranger!', 'success');
+}
+
+function strangerStartHeartCountdown() {
+    let remaining = HEART_COUNTDOWN_SEC;
+    document.getElementById('heart-countdown').textContent = remaining;
+
+    if (strangerHeartCountdown) clearInterval(strangerHeartCountdown);
+    strangerHeartCountdown = setInterval(() => {
+        remaining--;
+        const el = document.getElementById('heart-countdown');
+        if (el) el.textContent = remaining;
+
+        if (remaining <= 0) {
+            clearInterval(strangerHeartCountdown);
+            strangerHeartCountdown = null;
+            // Time expired — hide banner, chat continues as stranger chat
+            const banner = document.getElementById('stranger-heart-banner');
+            if (banner) banner.style.display = 'none';
+            toast('💔 Time expired. Continue chatting as strangers.', 'info');
+        }
+    }, 1000);
+}
+
+function strangerOnHeartReceived() {
+    toast('❤️ Your stranger clicked heart! Click yours too within the countdown!', 'info');
+}
+
+function strangerMoveToDM(data) {
+    // Clean up stranger session first
+    strangerCleanupAll();
+    strangerShowLobby();
+    toast('💕 Moving to Direct Message! Your identities are now revealed.', 'success');
+    // Open DM with this person
+    openDM(data.partnerNick);
+}
+
+function strangerOnEnded(data) {
+    strangerCleanupAll();
+    strangerShowLobby();
+    const reason = data.reason === 'partner_disconnected' ? 'Your stranger disconnected.' :
+        data.reason === 'partner_ended' ? 'Your stranger ended the chat.' : 'Chat ended.';
+    toast(`👋 ${reason}`, 'info');
+    const msgs = document.getElementById('stranger-messages');
+    if (msgs) msgs.innerHTML = '';
+}
+
+function strangerCleanupAll() {
+    strangerSessionId = null;
+    strangerStartTime = null;
+    strangerMyHeartClicked = false;
+    strangerReplyTo = null;
+    strangerEditingId = null;
+    strangerMsgs.length = 0;
+    if (strangerDurationTimer) { clearInterval(strangerDurationTimer); strangerDurationTimer = null; }
+    if (strangerHeartCountdown) { clearInterval(strangerHeartCountdown); strangerHeartCountdown = null; }
+}
+
+function strangerCleanupUI() {
+    strangerCleanupAll();
+    strangerShowLobby();
+}
+
+// ── Heart click ────────────────────────────────────────────
+function strangerClickHeart() {
+    if (strangerMyHeartClicked) return;
+    strangerMyHeartClicked = true;
+    wsSend({ type: 'stranger_heart' });
+    const btn = document.getElementById('stranger-heart-btn');
+    btn.textContent = '❤️ Waiting for stranger…';
+    btn.classList.add('clicked');
+    btn.disabled = true;
+    toast('❤️ You clicked heart! Waiting for stranger…', 'info');
+}
+
+// ── Send stranger message ──────────────────────────────────
+function sendStrangerMsg() {
+    const input = document.getElementById('stranger-input');
+    const msg = input.value.trim();
+    if (!msg || !strangerSessionId) return;
+
+    if (strangerEditingId) {
+        const entry = strangerMsgs.find(m => m.id === strangerEditingId);
+        if (entry) {
+            entry.text = msg;
+            entry.edited = true;
+            refreshStrangerBubble(strangerEditingId);
+            wsSend({ type: 'stranger_edit', msgId: strangerEditingId, newText: msg });
+        }
+        input.value = ''; input.style.height = '';
+        clearStrangerEdit();
+        return;
+    }
+
+    const smsgId = newSmsgId();
+    const entry = { id: smsgId, text: msg, sent: true, time: Date.now(), reactions: {}, deleted: false, edited: false, replyTo: strangerReplyTo ? { ...strangerReplyTo } : null };
+    strangerMsgs.push(entry);
+
+    const msgs = document.getElementById('stranger-messages');
+    msgs.appendChild(buildStrangerBubble(entry));
+    msgs.scrollTop = msgs.scrollHeight;
+
+    wsSend({ type: 'stranger_msg', message: msg, msgId: smsgId, replyTo: entry.replyTo });
+    input.value = ''; input.style.height = '';
+    clearStrangerReply();
+}
+
+function handleStrangerKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendStrangerMsg(); }
+}
+
+// ── Receive stranger messages ──────────────────────────────
+function strangerReceiveMsg(data) {
+    const entry = { id: data.msgId, text: data.message, sent: false, time: data.timestamp, reactions: {}, deleted: false, edited: false, replyTo: data.replyTo || null };
+    strangerMsgs.push(entry);
+    const msgs = document.getElementById('stranger-messages');
+    msgs.appendChild(buildStrangerBubble(entry));
+    msgs.scrollTop = msgs.scrollHeight;
+}
+
+function strangerOnMsgSent(data) {
+    // Already rendered optimistically
+}
+
+function strangerReceiveEdit(data) {
+    const entry = strangerMsgs.find(m => m.id === data.msgId);
+    if (entry) { entry.text = data.newText; entry.edited = true; refreshStrangerBubble(data.msgId); }
+}
+
+function strangerReceiveDelete(data) {
+    const entry = strangerMsgs.find(m => m.id === data.msgId);
+    if (entry) { entry.deleted = true; entry.text = ''; refreshStrangerBubble(data.msgId); }
+}
+
+function strangerReceiveReact(data) {
+    const entry = strangerMsgs.find(m => m.id === data.msgId);
+    if (!entry) return;
+    if (!entry.reactions) entry.reactions = {};
+    entry.reactions[data.emoji] = (entry.reactions[data.emoji] || 0) + 1;
+    refreshStrangerBubble(data.msgId);
+}
+
+// ── Stranger reply/edit ────────────────────────────────────
+function startStrangerReply(msgId, text) {
+    strangerReplyTo = { msgId, text };
+    clearStrangerEdit();
+    document.getElementById('stranger-reply-text').textContent =
+        `↩ "${text.slice(0, 50)}${text.length > 50 ? '…' : ''}"`;
+    document.getElementById('stranger-reply-banner').classList.add('show');
+    document.getElementById('stranger-input').focus();
+}
+
+function clearStrangerReply() {
+    strangerReplyTo = null;
+    const b = document.getElementById('stranger-reply-banner');
+    if (b) b.classList.remove('show');
+}
+
+function startStrangerEdit(msgId) {
+    const entry = strangerMsgs.find(m => m.id === msgId);
+    if (!entry || !entry.sent) return;
+    clearStrangerReply();
+    strangerEditingId = msgId;
+    const input = document.getElementById('stranger-input');
+    input.value = entry.text;
+    autoResize(input);
+    input.focus();
+    document.getElementById('stranger-edit-banner').classList.add('show');
+}
+
+function clearStrangerEdit() {
+    strangerEditingId = null;
+    const b = document.getElementById('stranger-edit-banner');
+    if (b) b.classList.remove('show');
+    const input = document.getElementById('stranger-input');
+    if (input) { input.value = ''; input.style.height = ''; }
+}
+
+function cancelStrangerEdit() {
+    strangerEditingId = null;
+    document.getElementById('stranger-edit-banner').classList.remove('show');
+    const input = document.getElementById('stranger-input');
+    input.value = ''; input.style.height = '';
+}
+
+// ── Delete stranger message ────────────────────────────────
+function deleteStrangerMsg(msgId) {
+    const entry = strangerMsgs.find(m => m.id === msgId);
+    if (!entry || !entry.sent) return;
+    entry.deleted = true; entry.text = '';
+    refreshStrangerBubble(msgId);
+    wsSend({ type: 'stranger_delete', msgId });
+}
+
+// ── Stranger react ─────────────────────────────────────────
+function openStrangerEmojiModal(msgId) {
+    pendingStrangerEmoji = msgId;
+    const grid = document.getElementById('stranger-emoji-grid');
+    grid.innerHTML = '';
+    EMOJIS.forEach(em => {
+        const btn = document.createElement('button');
+        btn.className = 'emoji-btn stranger-emoji-btn';
+        btn.textContent = em;
+        btn.dataset.strangerPickEmoji = em;
+        grid.appendChild(btn);
+    });
+    openModal('stranger-emoji-modal');
+}
+
+function sendStrangerReaction(emoji, msgId) {
+    const id = msgId || pendingStrangerEmoji;
+    if (!id || !strangerSessionId) return;
+    wsSend({ type: 'stranger_react', msgId: id, emoji });
+    pendingStrangerEmoji = null;
+}
+
+// ── Stranger report ────────────────────────────────────────
+function openStrangerReportModal(msgId, text) {
+    pendingStrangerReport = { msgId, text };
+    const box = document.getElementById('stranger-report-preview-box');
+    box.textContent = `"${text.slice(0, 120)}${text.length > 120 ? '…' : ''}"`;
+    document.getElementById('stranger-report-reason').value = '';
+    openModal('stranger-report-modal');
+}
+
+function submitStrangerReport() {
+    if (!pendingStrangerReport) return;
+    const reason = document.getElementById('stranger-report-reason').value.trim();
+    wsSend({
+        type: 'stranger_report',
+        msgId: pendingStrangerReport.msgId,
+        message: pendingStrangerReport.text,
+        reason: reason || '(no reason provided)',
+        source: 'Anonymous Stranger Chat',
+    });
+    closeModal('stranger-report-modal');
+    document.getElementById('stranger-report-reason').value = '';
+    toast('Report submitted to admin.', 'success');
+    pendingStrangerReport = null;
+}
+
+// ── Announcement report ────────────────────────────────────
+let pendingAnnReport = null;
+
+function openAnnReportModal(annId, text) {
+    pendingAnnReport = { annId, text };
+    const box = document.getElementById('ann-report-preview-box');
+    box.textContent = `"${text.slice(0, 120)}${text.length > 120 ? '…' : ''}"`;
+    document.getElementById('ann-report-reason').value = '';
+    openModal('ann-report-modal');
+}
+
+function submitAnnReport() {
+    if (!pendingAnnReport) return;
+    const reason = document.getElementById('ann-report-reason').value.trim();
+    wsSend({
+        type: 'report',
+        msgId: pendingAnnReport.annId,
+        targetNick: 'Admin',
+        targetCampus: 'All Campuses',
+        message: pendingAnnReport.text,
+        reason: reason || '(no reason provided)',
+        source: 'Announcement',
+    });
+    closeModal('ann-report-modal');
+    document.getElementById('ann-report-reason').value = '';
+    toast('Announcement reported to admin.', 'success');
+    pendingAnnReport = null;
+}
+
+// ── Build stranger message bubble ──────────────────────────
+/**
+ * Same fix as DM: inline always-visible action buttons.
+ */
+function buildStrangerBubble(m) {
+    const wrap = document.createElement('div');
+    wrap.className = `smsg ${m.sent ? 'sent' : 'recv'}${m.deleted ? ' deleted' : ''}`;
+    wrap.id = 'smsg-bubble-' + m.id;
+    wrap.dataset.smsgId = m.id;
+
+    const time = formatTime(m.time);
+    const bubbleText = m.deleted ? '🗑 Message deleted.' : escapeHTML(m.text);
+    const editedBadge = m.edited && !m.deleted ? `<span class="smsg-edited-badge">edited</span>` : '';
+    const replyHTML = m.replyTo
+        ? `<div class="smsg-reply-preview">↩ "${escapeHTML(m.replyTo.text.slice(0, 50))}"</div>` : '';
+
+    // Reactions
+    let reactHTML = '';
+    if (m.reactions && Object.keys(m.reactions).length) {
+        reactHTML = Object.entries(m.reactions).map(([emoji, count]) =>
+            `<span class="smsg-reaction-pill" data-spill-id="${m.id}" data-spill-emoji="${emoji}">${emoji} ${count}</span>`
+        ).join('');
+    }
+
+    wrap.innerHTML = `
+    <div class="smsg-bubble">${replyHTML}${bubbleText}</div>
+    <div class="smsg-reactions">${reactHTML}</div>
+    <div class="smsg-meta"><span>${time}</span>${editedBadge}</div>`;
+
+    // Inline action buttons
+    if (!m.deleted) {
+        const actionsEl = document.createElement('div');
+        actionsEl.className = 'smsg-actions';
+
+        const reactBtn = document.createElement('button');
+        reactBtn.className = 'smsg-action-btn';
+        reactBtn.dataset.sReact = m.id;
+        reactBtn.textContent = '😊 React';
+        actionsEl.appendChild(reactBtn);
+
+        const replyBtn = document.createElement('button');
+        replyBtn.className = 'smsg-action-btn';
+        replyBtn.dataset.sReply = m.id;
+        replyBtn.dataset.sReplyText = m.text;
+        replyBtn.textContent = '↩ Reply';
+        actionsEl.appendChild(replyBtn);
+
+        if (m.sent) {
+            const editBtn = document.createElement('button');
+            editBtn.className = 'smsg-action-btn smsg-act-edit';
+            editBtn.dataset.sEdit = m.id;
+            editBtn.textContent = '✏️ Edit';
+            actionsEl.appendChild(editBtn);
+
+            const delBtn = document.createElement('button');
+            delBtn.className = 'smsg-action-btn smsg-act-delete';
+            delBtn.dataset.sDelete = m.id;
+            delBtn.textContent = '🗑 Delete';
+            actionsEl.appendChild(delBtn);
+        }
+
+        if (!m.sent) {
+            const repBtn = document.createElement('button');
+            repBtn.className = 'smsg-action-btn smsg-act-report';
+            repBtn.dataset.sReport = m.id;
+            repBtn.dataset.sReportText = m.text;
+            repBtn.textContent = '🚨 Report';
+            actionsEl.appendChild(repBtn);
+        }
+
+        wrap.appendChild(actionsEl);
+    }
+
+    return wrap;
+}
+
+function refreshStrangerBubble(msgId) {
+    const entry = strangerMsgs.find(m => m.id === msgId);
+    if (!entry) return;
+    const existing = document.getElementById('smsg-bubble-' + msgId);
+    if (!existing) return;
+    existing.replaceWith(buildStrangerBubble(entry));
+}
+
+// ============================================================
+// ADMIN LOGIN
+// ============================================================
+function adminLogin() {
+    const secret = document.getElementById('admin-secret-input').value;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        ws = new WebSocket(`${proto}://${location.host}`);
+        ws.onopen = () => {
+            ws.send(JSON.stringify({ type: 'join', nickname: 'Admin', campus: 'Admin' }));
+            setTimeout(() => wsSend({ type: 'admin_auth', secret }), 300);
+        };
+        ws.onmessage = (e) => { try { handleServerMessage(JSON.parse(e.data)); } catch { } };
+        ws.onerror = () => toast('Connection error.', 'error');
+    } else {
+        wsSend({ type: 'admin_auth', secret });
+    }
+}
+
+// ============================================================
+// ADMIN DATA RENDERING
+// ============================================================
+function renderAdminData(reports, bannedIPs) {
+    if (reports != null) {
+        const list = document.getElementById('reports-list');
+        list.innerHTML = '';
+        document.getElementById('report-count-badge').textContent = reports.length;
+        if (!reports.length) { list.innerHTML = '<div class="empty-state">No reports yet.</div>'; }
+        else { reports.forEach(r => appendReport(r)); }
+    }
+    if (bannedIPs != null) {
+        const list = document.getElementById('bans-list');
+        list.innerHTML = '';
+        if (!bannedIPs.length) { list.innerHTML = '<div class="empty-state">No active bans.</div>'; }
+        else { bannedIPs.forEach(([ip, info]) => appendBanRow(ip, info)); }
+    }
+}
+
+function appendReport(r) {
+    const list = document.getElementById('reports-list');
+    const placeholder = list.querySelector('.empty-state');
+    if (placeholder) placeholder.remove();
+
+    const card = document.createElement('div');
+    card.className = 'report-card';
+    const time = formatDateTime(r.timestamp);
+
+    // Source tag — shows where the report came from
+    const sourceLabel = r.source || (r.isStranger ? 'Anonymous Stranger Chat' : r.isDM ? 'Direct Message' : 'Global Chat');
+    const sourceIcon = r.source === 'Announcement' ? '📣'
+        : r.isStranger || r.source === 'Anonymous Stranger Chat' ? '🎲'
+            : r.isDM || r.source === 'Direct Message' ? '💬' : '🌐';
+    const sourceTag = `<span class="report-tag tag-type">${sourceIcon} ${escapeHTML(sourceLabel)}</span>`;
+
+    card.innerHTML = `
+    <div class="report-meta">
+      <span class="report-tag tag-nick">👤 ${escapeHTML(r.targetNick)}</span>
+      <span class="report-tag tag-campus">🏫 ${escapeHTML(r.targetCampus || 'Direct Message')}</span>
+      ${sourceTag}
+      <span style="font-size:0.72rem;color:var(--text3);margin-left:auto">${time}</span>
+    </div>
+    <div class="ip-block">
+      <div class="ip-entry">
+        <span class="ip-label">🚫 Reported User IP</span>
+        <span class="ip-value">${escapeHTML(r.ip || 'unknown')}</span>
+      </div>
+      <div class="ip-entry">
+        <span class="ip-label">📨 Reporter IP</span>
+        <span class="ip-value" style="color:var(--text2)">${escapeHTML(r.reporterIP || 'unknown')}</span>
+      </div>
+    </div>
+    <div class="report-message">"${escapeHTML(r.message || '')}"</div>
+    <div class="report-reason-block">
+      <span class="report-reason-label">📝 Reason:</span>
+      <span class="report-reason-text">${escapeHTML(r.reason || '(no reason provided)')}</span>
+    </div>
+    <div style="font-size:0.78rem;color:var(--text2);margin:6px 0 12px"><strong>Reported by:</strong> ${escapeHTML(r.reporterNick || 'Anonymous')}</div>
+    <div class="report-actions">
+      <button class="btn btn-danger btn-xs" data-ban-ip="${escapeHTML(r.ip || '')}" data-ban-nick="${escapeHTML(r.targetNick)}">🚫 Ban User</button>
+    </div>`;
+
+    list.appendChild(card);
+    const badge = document.getElementById('report-count-badge');
+    badge.textContent = parseInt(badge.textContent || 0) + 1;
+}
+
+function appendBanRow(ip, info) {
+    const list = document.getElementById('bans-list');
+    const type = info.permanent ? '🔴 Permanent' : `⏱ Temporary (expires ${formatDateTime(info.expiry)})`;
+    const row = document.createElement('div');
+    row.className = 'ban-row';
+    row.innerHTML = `
+    <div>
+      <div class="ban-ip">${escapeHTML(ip)}</div>
+      <div class="ban-type">${type} · ${escapeHTML(info.nickname || '')}</div>
+    </div>
+    <button class="btn btn-ghost btn-xs" data-unban-ip="${escapeHTML(ip)}">Unban</button>`;
+    list.appendChild(row);
+}
+
+function openBanModal(ip, nick) {
+    document.getElementById('ban-modal-ip').value = ip;
+    document.getElementById('ban-modal-nick').value = nick;
+    document.getElementById('ban-modal-sub').textContent = `Ban ${nick} (${ip})`;
+    openModal('ban-modal');
+}
+
+function executeBan() {
+    const ip = document.getElementById('ban-modal-ip').value;
+    const nick = document.getElementById('ban-modal-nick').value;
+    const sel = document.getElementById('ban-type-select').value;
+    const permanent = sel === 'permanent';
+    const duration = permanent ? 0 : (BAN_DURATIONS[sel] || 3_600_000);
+    wsSend({ type: 'admin_ban', ip, nickname: nick, permanent, duration });
+    closeModal('ban-modal');
+}
+
+function unbanIP(ip) { wsSend({ type: 'admin_unban', ip }); }
+
+function postAnnouncement() {
+    const text = document.getElementById('ann-input').value.trim();
+    if (!text) return;
+    wsSend({ type: 'admin_announce', text });
+    document.getElementById('ann-input').value = '';
+    toast('Announcement posted!', 'success');
+}
+
+// ============================================================
+// EVENT DELEGATION — clicks
+// Single listener on document. Uses closest() so clicking
+// child elements of buttons still works correctly.
+// ============================================================
+document.addEventListener('click', (e) => {
+    const t = e.target;
+    const closest = (sel) => t.closest(sel);
+
+    // ── Theme ──
+    if (closest('#theme-toggle') || closest('#chat-theme-toggle')) return toggleTheme();
+
+    // ── Front page ──
+    if (t.id === 'enter-chat-btn') return enterChat();
+    if (t.id === 'go-admin-btn') return showPage('admin');
+
+    // ── Chat page ──
+    if (t.id === 'leave-chat-btn') return leaveChat();
+    if (t.id === 'scroll-bottom-btn') return scrollToBottom();
+    if (t.id === 'send-chat-btn') return sendChat();
+    if (t.id === 'reply-close-btn') return clearReply();
+    if (t.id === 'send-dm-btn') return sendDM();
+    if (t.id === 'close-dm-btn') return closeDM();
+    if (t.id === 'dm-reply-close-btn') return clearDMReply();
+    if (t.id === 'dm-edit-cancel-btn') return cancelDMEdit();
+
+    // ── Stranger controls ──
+    if (t.id === 'stranger-find-btn') return strangerFind();
+    if (t.id === 'stranger-cancel-btn') return strangerCancel();
+    if (t.id === 'stranger-end-btn') return strangerEnd();
+    if (t.id === 'stranger-heart-btn') return strangerClickHeart();
+    if (t.id === 'send-stranger-btn') return sendStrangerMsg();
+    if (t.id === 'stranger-reply-close-btn') return clearStrangerReply();
+    if (t.id === 'stranger-edit-cancel-btn') return cancelStrangerEdit();
+
+    // ── Sidebar nav ──
+    const navItem = closest('.nav-item[data-panel]');
+    if (navItem) return showPanel(navItem.dataset.panel);
+
+    const msgNick = closest('.msg-nick[data-dm-nick]');
+    if (msgNick) return openDM(msgNick.dataset.dmNick);
+
+    const onlineUser = closest('.online-user[data-dm-nick]');
+    if (onlineUser) return openDM(onlineUser.dataset.dmNick);
+
+    const dmNavItem = closest('[data-dm-nav]');
+    if (dmNavItem) return openDM(dmNavItem.dataset.dmNav);
+
+    // ── Announcement report button ──
+    const annReportBtn = closest('[data-ann-report-id]');
+    if (annReportBtn) return openAnnReportModal(annReportBtn.dataset.annReportId, annReportBtn.dataset.annReportText);
+
+    // ── Global chat actions ──
+    const replyBtn = closest('[data-reply-id]');
+    if (replyBtn) return startReply(replyBtn.dataset.replyId, replyBtn.dataset.replyNick, replyBtn.dataset.replyMsg);
+
+    const emojiBtn = closest('[data-emoji-id]');
+    if (emojiBtn) return openEmojiModal(emojiBtn.dataset.emojiId);
+
+    const reportBtn = closest('[data-report-id]');
+    if (reportBtn) return openReportModal(reportBtn.dataset.reportId, reportBtn.dataset.reportNick, reportBtn.dataset.reportCampus, reportBtn.dataset.reportMsg);
+
+    const reactionPill = closest('.reaction-pill[data-emoji]');
+    if (reactionPill) { const msgEl = reactionPill.closest('.msg'); if (msgEl) sendEmoji(reactionPill.dataset.emoji, msgEl.id); return; }
+
+    // ── DM actions ──
+    const dmReactBtn = closest('[data-dm-react]');
+    if (dmReactBtn) return openDMEmojiModal(dmReactBtn.dataset.dmReact);
+
+    const dmReplyBtn = closest('[data-dm-reply]');
+    if (dmReplyBtn) return startDMReply(dmReplyBtn.dataset.dmReply, dmReplyBtn.dataset.dmReplyNick, dmReplyBtn.dataset.dmReplyText);
+
+    const dmEditBtn = closest('[data-dm-edit]');
+    if (dmEditBtn) return startDMEdit(dmEditBtn.dataset.dmEdit);
+
+    const dmDeleteBtn = closest('[data-dm-delete]');
+    if (dmDeleteBtn) { if (confirm('Delete this message?')) deleteDMMsg(dmDeleteBtn.dataset.dmDelete); return; }
+
+    const dmReportBtn = closest('[data-dm-report]');
+    if (dmReportBtn) return openDMReportModal(dmReportBtn.dataset.dmReport, dmReportBtn.dataset.dmReportNick, dmReportBtn.dataset.dmReportText);
+
+    const dmPill = closest('.dm-reaction-pill[data-dm-pill-id]');
+    if (dmPill) { sendDMReaction(dmPill.dataset.dmPillEmoji, dmPill.dataset.dmPillId); return; }
+
+    // ── Stranger actions ──
+    const sReactBtn = closest('[data-s-react]');
+    if (sReactBtn) return openStrangerEmojiModal(sReactBtn.dataset.sReact);
+
+    const sReplyBtn = closest('[data-s-reply]');
+    if (sReplyBtn) return startStrangerReply(sReplyBtn.dataset.sReply, sReplyBtn.dataset.sReplyText);
+
+    const sEditBtn = closest('[data-s-edit]');
+    if (sEditBtn) return startStrangerEdit(sEditBtn.dataset.sEdit);
+
+    const sDeleteBtn = closest('[data-s-delete]');
+    if (sDeleteBtn) { if (confirm('Delete this message?')) deleteStrangerMsg(sDeleteBtn.dataset.sDelete); return; }
+
+    const sReportBtn = closest('[data-s-report]');
+    if (sReportBtn) return openStrangerReportModal(sReportBtn.dataset.sReport, sReportBtn.dataset.sReportText);
+
+    const sPill = closest('.smsg-reaction-pill[data-spill-id]');
+    if (sPill) { sendStrangerReaction(sPill.dataset.spillEmoji, sPill.dataset.spillId); return; }
+
+    // ── Emoji modals — check specific BEFORE generic ──
+    const strangerEmoji = closest('.stranger-emoji-btn[data-stranger-pick-emoji]');
+    if (strangerEmoji) { sendStrangerReaction(strangerEmoji.dataset.strangerPickEmoji); closeModal('stranger-emoji-modal'); return; }
+
+    const dmEmoji = closest('.dm-emoji-btn[data-dm-pick-emoji]');
+    if (dmEmoji) { sendDMReaction(dmEmoji.dataset.dmPickEmoji); closeModal('dm-emoji-modal'); return; }
+
+    const globalEmoji = closest('.global-emoji-btn[data-global-emoji]');
+    if (globalEmoji) { sendEmoji(globalEmoji.dataset.globalEmoji); closeModal('emoji-modal'); return; }
+
+    // ── Report modals ──
+    if (t.id === 'submit-report-btn') return submitReport();
+    if (t.id === 'submit-dm-report-btn') return submitDMReport();
+    if (t.id === 'submit-stranger-report-btn') return submitStrangerReport();
+    if (t.id === 'submit-ann-report-btn') return submitAnnReport();
+
+    // ── Ban modal ──
+    const banBtn = closest('[data-ban-ip]');
+    if (banBtn) return openBanModal(banBtn.dataset.banIp, banBtn.dataset.banNick);
+    if (t.id === 'execute-ban-btn') return executeBan();
+
+    const unbanBtn = closest('[data-unban-ip]');
+    if (unbanBtn) return unbanIP(unbanBtn.dataset.unbanIp);
+
+    // ── Admin page ──
+    if (t.id === 'admin-login-btn') return adminLogin();
+    if (t.id === 'admin-back-btn') return showPage('front');
+    if (t.id === 'admin-exit-btn') return showPage('front');
+    if (t.id === 'post-ann-btn') return postAnnouncement();
+
+    // ── Generic modal close ──
+    const closeModalBtn = closest('[data-close-modal]');
+    if (closeModalBtn) return closeModal(closeModalBtn.dataset.closeModal);
+
+    if (t.classList.contains('modal-overlay')) return closeModal(t.id);
+});
+
+// ============================================================
+// EVENT DELEGATION — keyboard
+// ============================================================
+document.addEventListener('keydown', (e) => {
+    if (e.target.id === 'chat-input') return handleChatKey(e);
+    if (e.target.id === 'dm-input') return handleDMKey(e);
+    if (e.target.id === 'stranger-input') return handleStrangerKey(e);
+    if (e.target.id === 'admin-secret-input' && e.key === 'Enter') return adminLogin();
+    if (e.target.id === 'ann-input' && e.key === 'Enter') return postAnnouncement();
+});
+
+// ============================================================
+// EVENT DELEGATION — textarea auto-resize
+// ============================================================
+document.addEventListener('input', (e) => {
+    if (e.target.classList.contains('chat-textarea')) autoResize(e.target);
+});

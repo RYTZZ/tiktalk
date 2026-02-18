@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>TikTalk</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+    <div id="app">
+
+        <!-- ======================================================
+       FRONT PAGE
+       ====================================================== -->
+        <div id="front-page" class="page active">
+            <div class="bg-grid"></div>
+            <div class="bg-blob blob1"></div>
+            <div class="bg-blob blob2"></div>
+            <div class="front-card">
+                <div class="brand">
+                    <div class="brand-logo">💬</div>
+                    <h1>TikTalk</h1>
+                    <p>Anonymous real-time university chat</p>
+                </div>
+                <div class="form-group">
+                    <label for="nick-input">Nickname</label>
+                    <input type="text" id="nick-input" placeholder="Enter your nickname..." maxlength="30" />
+                </div>
+                <div class="form-group">
+                    <label for="campus-select">Campus</label>
+                    <select id="campus-select">
+                        <option value="">-- Select your campus --</option>
+                        <option>Bulan Campus</option>
+                        <option>Castilla Campus</option>
+                        <option>Magallanes Campus</option>
+                        <option>Sorsogon City Campus</option>
+                    </select>
+                </div>
+                <button class="btn btn-primary" id="enter-chat-btn">Enter Chat ✦</button>
+                <div class="front-footer">
+                    <div class="toggle-wrap">
+                        <span class="toggle-label">🌙 Dark</span>
+                        <div class="toggle on" id="theme-toggle">
+                            <div class="toggle-knob"></div>
+                        </div>
+                    </div>
+                    <button class="btn btn-ghost btn-sm" id="go-admin-btn">🛡 Admin</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ======================================================
+       CHAT PAGE
+       ====================================================== -->
+        <div id="chat-page" class="page">
+
+            <!-- Sidebar -->
+            <div class="sidebar" id="sidebar">
+                <div class="sidebar-header">
+                    <span class="sidebar-brand">TikTalk</span>
+                    <div class="toggle on" id="chat-theme-toggle">
+                        <div class="toggle-knob"></div>
+                    </div>
+                </div>
+                <div class="sidebar-nav">
+                    <div class="nav-item active" id="nav-global" data-panel="global"><span class="icon">🌐</span> Global
+                        Chat</div>
+                    <div class="nav-item" id="nav-ann" data-panel="ann"><span class="icon">📣</span> Announcements</div>
+                    <div class="nav-item" id="nav-stranger" data-panel="stranger"><span class="icon">🎲</span> Match
+                        Stranger</div>
+                </div>
+                <div id="dm-nav-section" style="display:none">
+                    <div class="sidebar-section-title">Direct Messages</div>
+                    <div id="dm-nav-list"></div>
+                </div>
+                <div class="sidebar-section-title">Online — <span id="online-count">0</span></div>
+                <div class="online-list" id="online-list"></div>
+                <div class="sidebar-bottom">
+                    <div class="me-card">
+                        <div class="avatar sm" id="me-avatar">?</div>
+                        <div class="me-info">
+                            <div class="me-name" id="me-name">-</div>
+                            <div class="me-campus" id="me-campus">-</div>
+                        </div>
+                    </div>
+                    <button class="btn btn-ghost btn-sm" id="leave-chat-btn" style="width:100%">Leave Chat</button>
+                </div>
+            </div>
+
+            <!-- Main area -->
+            <div class="chat-main">
+
+                <!-- Global Chat Panel -->
+                <div class="chat-panel active" id="panel-global">
+                    <div class="chat-header">
+                        <div>
+                            <div class="chat-title">🌐 Global Chat</div>
+                            <div class="chat-subtitle">All campuses · Real-time</div>
+                        </div>
+                        <button class="btn btn-ghost btn-sm" id="scroll-bottom-btn">↓ Latest</button>
+                    </div>
+                    <div class="messages-wrap" id="messages-wrap">
+                        <div class="system-msg">Welcome to TikTalk! Be respectful</div>
+                    </div>
+                    <div class="chat-input-wrap">
+                        <div class="context-banner" id="reply-banner">
+                            <span class="context-icon">↩</span>
+                            <span id="reply-preview-text" class="context-text">Replying to...</span>
+                            <button class="context-close" id="reply-close-btn">✕</button>
+                        </div>
+                        <div class="input-row">
+                            <textarea class="chat-textarea" id="chat-input" placeholder="Type a message..."
+                                rows="1"></textarea>
+                            <button class="send-btn" id="send-chat-btn">➤</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Announcements Panel -->
+                <div class="chat-panel" id="panel-ann">
+                    <div id="ann-panel">
+                        <div class="ann-header">
+                            <div class="ann-title">📣 Announcements</div>
+                            <div class="ann-subtitle">Official messages from TikTalk admin</div>
+                        </div>
+                        <div class="ann-list" id="ann-list">
+                            <div class="ann-empty">
+                                <div class="ann-empty-icon">📭</div>
+                                <div>No announcements yet.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DM Panel -->
+                <div class="chat-panel" id="panel-dm">
+                    <div class="dm-area">
+                        <div class="dm-header">
+                            <div class="avatar sm" id="dm-avatar">?</div>
+                            <div>
+                                <div class="dm-title" id="dm-with-name">-</div>
+                                <div class="dm-sub">🔒 Anonymous Direct Message</div>
+                            </div>
+                            <button class="btn btn-ghost btn-sm" id="close-dm-btn" style="margin-left:auto">✕
+                                Close</button>
+                        </div>
+                        <div class="dm-messages" id="dm-messages"></div>
+                        <div class="dm-input-wrap">
+                            <div class="context-banner" id="dm-reply-banner">
+                                <span class="context-icon">↩</span>
+                                <span id="dm-reply-preview-text" class="context-text">Replying to...</span>
+                                <button class="context-close" id="dm-reply-close-btn">✕</button>
+                            </div>
+                            <div class="context-banner edit" id="dm-edit-banner">
+                                <span class="context-icon">✏️</span>
+                                <span class="context-text">Editing message</span>
+                                <button class="context-close" id="dm-edit-cancel-btn">✕ Cancel</button>
+                            </div>
+                            <div class="input-row">
+                                <textarea class="chat-textarea" id="dm-input" placeholder="Send a private message..."
+                                    rows="1"></textarea>
+                                <button class="send-btn" id="send-dm-btn">➤</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Stranger Matching Panel -->
+                <div class="chat-panel" id="panel-stranger">
+                    <div class="stranger-area">
+
+                        <!-- Lobby: idle state -->
+                        <div id="stranger-lobby" class="stranger-lobby">
+                            <div class="stranger-lobby-icon">🎲</div>
+                            <div class="stranger-lobby-title">Anonymous Stranger Matching</div>
+                            <div class="stranger-lobby-sub">Get randomly paired with another User. Both
+                                identities stay anonymous throughout the session.</div>
+                            <button class="btn btn-primary" id="stranger-find-btn" style="max-width:240px">🔍 Match with
+                                a Stranger</button>
+                        </div>
+
+                        <!-- Searching state -->
+                        <div id="stranger-searching" class="stranger-searching" style="display:none">
+                            <div class="stranger-spinner"></div>
+                            <div class="stranger-searching-text">Looking for a stranger…</div>
+                            <button class="btn btn-ghost btn-sm" id="stranger-cancel-btn"
+                                style="margin-top:16px">Cancel</button>
+                        </div>
+
+                        <!-- Active chat -->
+                        <div id="stranger-chat" class="stranger-chat-wrap" style="display:none">
+                            <div class="stranger-chat-header">
+                                <div>
+                                    <div class="stranger-chat-title">👤 Anonymous Stranger</div>
+                                    <div class="stranger-chat-sub" id="stranger-duration">00:00:00</div>
+                                </div>
+                                <button class="btn btn-danger btn-sm" id="stranger-end-btn">✕ End Chat</button>
+                            </div>
+
+                            <!-- Heart banner (shown after 5 min) -->
+                            <div id="stranger-heart-banner" class="stranger-heart-banner" style="display:none">
+                                <div class="heart-banner-text">💕 CONTINUE CHATTING?</div>
+                                <div class="heart-banner-sub">Both must click ❤️ within <span
+                                        id="heart-countdown">30</span>s to move to Direct Message</div>
+                                <button class="btn btn-heart" id="stranger-heart-btn">❤️ Yes, Continue!</button>
+                            </div>
+
+                            <div class="stranger-messages" id="stranger-messages"></div>
+
+                            <div class="stranger-input-wrap">
+                                <div class="context-banner" id="stranger-reply-banner">
+                                    <span class="context-icon">↩</span>
+                                    <span id="stranger-reply-text" class="context-text">Replying to...</span>
+                                    <button class="context-close" id="stranger-reply-close-btn">✕</button>
+                                </div>
+                                <div class="context-banner edit" id="stranger-edit-banner">
+                                    <span class="context-icon">✏️</span>
+                                    <span class="context-text">Editing message</span>
+                                    <button class="context-close" id="stranger-edit-cancel-btn">✕ Cancel</button>
+                                </div>
+                                <div class="input-row">
+                                    <textarea class="chat-textarea" id="stranger-input"
+                                        placeholder="Say something to your stranger..." rows="1"></textarea>
+                                    <button class="send-btn" id="send-stranger-btn">➤</button>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+            </div><!-- /chat-main -->
+        </div><!-- /chat-page -->
+
+        <!-- ======================================================
+       ADMIN PAGE
+       ====================================================== -->
+        <div id="admin-page" class="page">
+            <div class="admin-wrap">
+                <div id="admin-login">
+                    <div class="admin-login-wrap">
+                        <div class="admin-login-title">🛡️ Admin Dashboard</div>
+                        <div class="admin-login-sub">Enter admin secret to access the moderation panel</div>
+                        <div class="admin-login-form">
+                            <input type="password" id="admin-secret-input" placeholder="Admin secret..." />
+                            <button class="btn btn-primary" id="admin-login-btn"
+                                style="width:auto;padding:12px 20px">Login</button>
+                        </div>
+                        <div style="margin-top:12px"><button class="btn btn-ghost btn-sm" id="admin-back-btn">←
+                                Back</button></div>
+                    </div>
+                </div>
+                <div id="admin-dashboard" style="display:none">
+                    <div class="admin-header">
+                        <div>
+                            <div class="admin-title">🛡️ Admin Dashboard</div>
+                            <div class="admin-header-sub">TikTalk Moderation Panel</div>
+                        </div>
+                        <div style="display:flex;gap:8px;align-items:center">
+                            <span class="admin-badge">Admin</span>
+                            <button class="btn btn-ghost btn-sm" id="admin-exit-btn">← Exit</button>
+                        </div>
+                    </div>
+                    <div class="admin-section">
+                        <div class="admin-section-title">📣 Post Announcement</div>
+                        <div style="display:flex;gap:10px">
+                            <input type="text" id="ann-input" placeholder="Type announcement..." />
+                            <button class="btn btn-primary" id="post-ann-btn"
+                                style="width:auto;padding:12px 20px">Post</button>
+                        </div>
+                    </div>
+                    <div class="admin-section">
+                        <div class="admin-section-title">🚨 Reported Messages <span class="badge"
+                                id="report-count-badge">0</span></div>
+                        <div id="reports-list">
+                            <div class="empty-state">No reports yet.</div>
+                        </div>
+                    </div>
+                    <div class="admin-section">
+                        <div class="admin-section-title">🚫 Banned Users</div>
+                        <div id="bans-list">
+                            <div class="empty-state">No active bans.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ======================================================
+       MODALS (all inside #app)
+       ====================================================== -->
+
+        <!-- Global: React -->
+        <div class="modal-overlay" id="emoji-modal">
+            <div class="modal" style="max-width:320px">
+                <div class="modal-title">😊 React to Message</div>
+                <div class="emoji-grid" id="emoji-grid"></div>
+                <div class="modal-actions"><button class="btn btn-ghost btn-sm"
+                        data-close-modal="emoji-modal">Cancel</button></div>
+            </div>
+        </div>
+
+        <!-- Global: Report -->
+        <div class="modal-overlay" id="report-modal">
+            <div class="modal">
+                <div class="modal-title">🚨 Report Message</div>
+                <div class="modal-sub">Source: <strong>Global Chat</strong> · Sent to admin for review.</div>
+                <div class="report-preview-box" id="report-preview-box"></div>
+                <div class="form-group" style="margin-top:14px">
+                    <label for="report-reason">Reason <span class="label-optional">(optional)</span></label>
+                    <textarea id="report-reason" class="report-textarea"
+                        placeholder="Describe why you're reporting this message…" rows="3"></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost btn-sm" data-close-modal="report-modal">Cancel</button>
+                    <button class="btn btn-danger btn-sm" id="submit-report-btn">🚨 Submit Report</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- DM: React -->
+        <div class="modal-overlay" id="dm-emoji-modal">
+            <div class="modal" style="max-width:320px">
+                <div class="modal-title">😊 React to DM</div>
+                <div class="emoji-grid" id="dm-emoji-grid"></div>
+                <div class="modal-actions"><button class="btn btn-ghost btn-sm"
+                        data-close-modal="dm-emoji-modal">Cancel</button></div>
+            </div>
+        </div>
+
+        <!-- DM: Report -->
+        <div class="modal-overlay" id="dm-report-modal">
+            <div class="modal">
+                <div class="modal-title">🚨 Report DM</div>
+                <div class="modal-sub">Source: <strong>Direct Message</strong> · Sent to admin with sender's IP.</div>
+                <div class="report-preview-box" id="dm-report-preview-box"></div>
+                <div class="form-group" style="margin-top:14px">
+                    <label for="dm-report-reason">Reason <span class="label-optional">(optional)</span></label>
+                    <textarea id="dm-report-reason" class="report-textarea"
+                        placeholder="Describe why you're reporting this message…" rows="3"></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost btn-sm" data-close-modal="dm-report-modal">Cancel</button>
+                    <button class="btn btn-danger btn-sm" id="submit-dm-report-btn">🚨 Submit Report</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stranger: React -->
+        <div class="modal-overlay" id="stranger-emoji-modal">
+            <div class="modal" style="max-width:320px">
+                <div class="modal-title">😊 React to Message</div>
+                <div class="emoji-grid" id="stranger-emoji-grid"></div>
+                <div class="modal-actions"><button class="btn btn-ghost btn-sm"
+                        data-close-modal="stranger-emoji-modal">Cancel</button></div>
+            </div>
+        </div>
+
+        <!-- Stranger: Report -->
+        <div class="modal-overlay" id="stranger-report-modal">
+            <div class="modal">
+                <div class="modal-title">🚨 Report Stranger</div>
+                <div class="modal-sub">Source: <strong>Anonymous Stranger Chat</strong> · Sent to admin dashboard.</div>
+                <div class="report-preview-box" id="stranger-report-preview-box"></div>
+                <div class="form-group" style="margin-top:14px">
+                    <label for="stranger-report-reason">Reason <span class="label-optional">(optional)</span></label>
+                    <textarea id="stranger-report-reason" class="report-textarea"
+                        placeholder="Describe why you're reporting this message…" rows="3"></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost btn-sm" data-close-modal="stranger-report-modal">Cancel</button>
+                    <button class="btn btn-danger btn-sm" id="submit-stranger-report-btn">🚨 Submit Report</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Announcement: Report -->
+        <div class="modal-overlay" id="ann-report-modal">
+            <div class="modal">
+                <div class="modal-title">🚨 Report Announcement</div>
+                <div class="modal-sub">Source: <strong>Announcements</strong> · Sent to admin dashboard.</div>
+                <div class="report-preview-box" id="ann-report-preview-box"></div>
+                <div class="form-group" style="margin-top:14px">
+                    <label for="ann-report-reason">Reason <span class="label-optional">(optional)</span></label>
+                    <textarea id="ann-report-reason" class="report-textarea"
+                        placeholder="Describe why you're reporting this announcement…" rows="3"></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost btn-sm" data-close-modal="ann-report-modal">Cancel</button>
+                    <button class="btn btn-danger btn-sm" id="submit-ann-report-btn">🚨 Submit Report</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Admin: Ban -->
+        <div class="modal-overlay" id="ban-modal">
+            <div class="modal">
+                <div class="modal-title">🚫 Ban User</div>
+                <div class="modal-sub" id="ban-modal-sub">Choose ban type for this user.</div>
+                <input type="hidden" id="ban-modal-ip" />
+                <input type="hidden" id="ban-modal-nick" />
+                <div class="form-group">
+                    <label for="ban-type-select">Ban Type</label>
+                    <select id="ban-type-select">
+                        <option value="temp-1h">Temporary — 1 Hour</option>
+                        <option value="temp-6h">Temporary — 6 Hours</option>
+                        <option value="temp-24h">Temporary — 24 Hours</option>
+                        <option value="temp-7d">Temporary — 7 Days</option>
+                        <option value="permanent">Permanent IP Ban</option>
+                    </select>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost btn-sm" data-close-modal="ban-modal">Cancel</button>
+                    <button class="btn btn-danger btn-sm" id="execute-ban-btn">Ban User</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="toast-container"></div>
+
+    </div><!-- /app -->
+    <script src="app.js"></script>
+</body>
+
+</html>

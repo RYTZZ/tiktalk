@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: sorsu-tiktalk
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: ADMIN_SECRET
+        generateValue: false
+        value: sorsu-admin-2024
+      - key: PORT
+        value: 3000
